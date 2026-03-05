@@ -1883,8 +1883,15 @@ class Scheduler(
 
         if self.dllm_config is not None and self.dllm_manager.any_staging_reqs():
             chunked_req_to_exclude.update(self.dllm_manager.staging_queue)
-            for req in self.dllm_manager.staging_queue:
-                self.stash_chunked_request(req)
+            if self.dllm_config.enable_fdfo_mode:
+                # Only FDFO mode uses stash_chunked_request (which calls cache_unfinished_req).
+                # Basic mode must NOT call stash_chunked_request because fill_ids contain
+                # mask tokens, causing radix tree key mismatch and KV slot leaks.
+                for req in self.dllm_manager.staging_queue:
+                    if (
+                        not req.dllm_incomplete_ids
+                    ):  # if not finished, do not update prefix_indices
+                        self.stash_chunked_request(req)
 
         if self.chunked_req is not None:
             # Move the chunked request out of the batch so that we can merge

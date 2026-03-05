@@ -6,9 +6,9 @@ import torch.nn.functional as F
 
 from sglang.srt.dllm.algorithm.base import DllmAlgorithm
 from sglang.srt.dllm.config import DllmConfig
-from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.model_runner import ModelRunner
+from sglang.srt.managers.utils import GenerationBatchResult
 
 
 class LowConfidence(DllmAlgorithm):
@@ -24,7 +24,8 @@ class LowConfidence(DllmAlgorithm):
         self,
         model_runner: ModelRunner,
         forward_batch: ForwardBatch,
-    ) -> Tuple[Union[LogitsProcessorOutput, torch.Tensor], List[torch.Tensor], bool]:
+    ) -> GenerationBatchResult:
+
         batch_size = forward_batch.batch_size
         # Here, the forward_batch full logits contains all the blocks
         # such as [dllm_block_size * batch_size, hidden_size]
@@ -37,7 +38,11 @@ class LowConfidence(DllmAlgorithm):
             logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
 
             next_token_ids = []
-            return logits_output, next_token_ids, can_run_cuda_graph
+            return GenerationBatchResult(
+                logits_output=logits_output,
+                next_token_ids=next_token_ids,
+                can_run_cuda_graph=can_run_cuda_graph,
+            )
 
         # Calculate start positions for each block
         for block_id in range(batch_size):
@@ -98,7 +103,11 @@ class LowConfidence(DllmAlgorithm):
             next_token_ids[i, start_list[i] :] for i in range(batch_size)
         ]
 
-        return logits_output, next_token_ids_list, can_run_cuda_graph
+        return GenerationBatchResult(
+            logits_output=logits_output,
+            next_token_ids=next_token_ids_list,
+            can_run_cuda_graph=can_run_cuda_graph,
+        )
 
 
 Algorithm = LowConfidence

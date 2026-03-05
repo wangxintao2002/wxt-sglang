@@ -9,6 +9,9 @@ from sglang.srt.dllm.mixin.req import DllmReqPhase
 from sglang.srt.managers.schedule_batch import Req, RequestStage, ScheduleBatch
 from sglang.srt.managers.schedule_policy import AddReqResult, PrefillAdder
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
+from sglang.srt.managers.utils import GenerationBatchResult
+import torch
+from sglang.srt.mem_cache.common import release_kv_cache
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +253,136 @@ class SchedulerDllmMixin:
 
         return AddReqResult.CONTINUE
 
+    def process_batch_result_dllm_fdfo(
+        self: Scheduler,
+        batch: ScheduleBatch,
+        result: GenerationBatchResult,
+    ):
+        if result.copy_done is not None:
+            result.copy_done.synchronize()
+        self.token_to_kv_pool_allocator.free_group_begin()
+        block_size = batch.dllm_config.get_block_size()
+        for idx in range(batch.batch_size()):
+            req = batch.reqs[idx]
+            next_token_ids: list = result.next_token_ids[idx]
+            len_cur_tokens = len(next_token_ids)
+            assert len_cur_tokens == block_size
+            if result.accept_length_per_req_cpu[idx] == 0:
+                req.dllm_incomplete_ids = next_token_ids
+                # release current kv cache since they are incomplete
+                old_prefix_len = (
+                    len(req.prefix_indices)
+                    if hasattr(req, "prefix_indices") and req.prefix_indices is not None
+                    else 0
+                )
+                new_fill_len = len(req.fill_ids)
+                if new_fill_len > old_prefix_len:
+                    kv_indices_to_free = self.req_to_token_pool.req_to_token[
+                    req.req_pool_idx, old_prefix_len:new_fill_len
+                    ]
+                    self.token_to_kv_pool_allocator.free(kv_indices_to_free)
+                continue
+            req.dllm_incomplete_ids = []
+            len_input = len(req.origin_input_ids)
+            len_fill = len(req.fill_ids)
+            if len_fill <= len_input:
+                continue # Since model is only filled with input ids, we are still on prefill stage.
+            if len_fill - len_cur_tokens < len_input:
+                next_token_ids = next_token_ids[
+                len_input - len_fill :
+                ] # avoid mix input and output
+            self.num_generated_tokens += len_cur_tokens
+            finished = False
+            for next_token_id in next_token_ids:
+                req.output_ids.append(next_token_id)
+                req.check_finished()
+
+                if req.finished():
+                    release_kv_cache(req, self.tree_cache)
+                    req.time_stats.completion_time = time.perf_counter()
+                    finished = True
+                    break
+        if not finished:
+            self.tree_cache.cache_unfinished_req(req)
+
+        self.stream_output(batch.reqs, batch.return_logprob)
+        self.token_to_kv_pool_allocator.free_group_end()
+
+    def process_batch_result_dllm_basic(
+        self: Scheduler,
+        batch: ScheduleBatch,
+        result: GenerationBatchResult,
+    ):
+        """Process DLLM basic mode results.
+        Key invariant: we must NOT call cache_unfinished_req here because
+        fill_ids contains mask tokens, but cache_finished_req (called from
+        release_kv_cache) uses origin_input_ids + output_ids as the radix
+        tree key. This key mismatch causes orphaned radix tree nodes that
+        leak KV slots. Instead, we manually manage prefix_indices (like FDFO SP).
+        """
+        if result.copy_done is not None:
+            result.copy_done.synchronize()
+        self.token_to_kv_pool_allocator.free_group_begin()
+        block_size = batch.dllm_config.get_block_size()
+        # Collect KV indices to free in batch for efficiency
+        kv_indices_to_free_list = []
+        for idx in range(batch.batch_size()):
+        # If no new tokens generated, meaning the prefilling stage
+            if not result.next_token_ids:
+                break
+            req = batch.reqs[idx]
+            next_token_ids = result.next_token_ids[idx].tolist()
+            origin_len = len(req.origin_input_ids)
+            fill_len = len(req.fill_ids)
+            # Only count generated tokens beyond origin_input_ids
+            if fill_len > origin_len:
+                output_start = max(0, origin_len - (fill_len - len(next_token_ids)))
+                tokens_to_process = next_token_ids[output_start:] if output_start > 0 else next_token_ids
+            else:
+                tokens_to_process = []
+            if not tokens_to_process:
+            # Still in prefill stage (fill_len <= origin_len), no output tokens
+            # Manually set prefix_indices for next round
+                kv_indices = self.req_to_token_pool.req_to_token[
+                req.req_pool_idx, :fill_len
+                ]
+                req.prefix_indices = kv_indices.to(dtype=torch.int64, copy=True)
+                continue
+            self.num_generated_tokens += len(tokens_to_process)
+            finished = False
+            for next_token_id in tokens_to_process:
+                req.output_ids.append(next_token_id)
+                req.check_finished()
+                if req.finished():
+                    # For finished requests: free mask KV slots, then release via radix tree.
+                    # The mask KV occupies req_to_token[origin_len:fill_len].
+                    # We shrink kv_committed_len and kv_allocated_len to origin_len + len(output_ids)
+                    # so that release_kv_cache -> cache_finished_req sees the correct range.
+                    final_len = origin_len + len(req.output_ids)
+                    # Free the mask KV slots that are beyond the final output
+                    if fill_len > final_len:
+                        kv_indices_to_free = self.req_to_token_pool.req_to_token[
+                        req.req_pool_idx, final_len:fill_len
+                        ]
+                        kv_indices_to_free_list.append(kv_indices_to_free)
+                    req.kv_committed_len = final_len
+                    req.kv_allocated_len = final_len
+                    release_kv_cache(req, self.tree_cache)
+                    req.time_stats.completion_time = time.perf_counter()
+                    finished = True
+                    break
+            if not finished:
+            # For unfinished requests: manually set prefix_indices
+            # DO NOT call cache_unfinished_req (radix tree key mismatch!)
+                kv_indices = self.req_to_token_pool.req_to_token[
+                    req.req_pool_idx, :fill_len
+                ]
+            req.prefix_indices = kv_indices.to(dtype=torch.int64, copy=True)
+        # Batch-free all collected KV indices
+        if kv_indices_to_free_list:
+            self.token_to_kv_pool_allocator.free(torch.cat(kv_indices_to_free_list))
+        self.stream_output(batch.reqs, batch.return_logprob)
+        self.token_to_kv_pool_allocator.free_group_end()
 
 class DllmManager:
     """

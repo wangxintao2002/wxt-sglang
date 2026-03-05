@@ -6,7 +6,6 @@ from sglang.srt.dllm.config import DllmConfig
 
 logger = logging.getLogger(__name__)
 
-
 def import_algorithms():
     mapping = {}
     package_name = "sglang.srt.dllm.algorithm"
@@ -35,5 +34,9 @@ def get_algorithm(config: DllmConfig):
     except:
         raise RuntimeError(f"Unknown diffusion LLM algorithm: {name}")
 
+def get_algorithm_fdfo_requirement(algorithm_name: str) -> bool:
+    if algorithm_name not in algo_name_to_cls:
+        return False
+    return getattr(algo_name_to_cls[algorithm_name], "require_fdfo_mode", False)
 
 algo_name_to_cls = import_algorithms()
