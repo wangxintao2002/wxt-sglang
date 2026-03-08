@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
@@ -83,6 +84,29 @@ class SchedulerOutputProcessorMixin:
             return details
         return None
 
+    def _bump_req_forward_count(self, batch: ScheduleBatch):
+        for req in batch.reqs:
+            if req.finished() or req.is_retracted:
+                continue
+            req.forward_count += 1
+
+    def _print_req_forward_count(self, req: Req):
+        if req.forward_count_logged:
+            return
+
+        print(
+            (
+                "[req-forward-count] "
+                f"rid={req.rid} "
+                f"forward_count={req.forward_count} "
+                f"input_len={len(req.origin_input_ids)} "
+                f"output_len={len(req.output_ids)}"
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+        req.forward_count_logged = True
+
     def process_batch_result_prebuilt(self: Scheduler, batch: ScheduleBatch):
         assert self.disaggregation_mode == DisaggregationMode.DECODE
         for req in batch.reqs:
@@ -126,6 +150,7 @@ class SchedulerOutputProcessorMixin:
         batch: ScheduleBatch,
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
     ):
+        self._bump_req_forward_count(batch)
         skip_stream_req = None
 
         if self.is_generation:
@@ -382,6 +407,7 @@ class SchedulerOutputProcessorMixin:
         if result.copy_done is not None:
             result.copy_done.synchronize()
 
+        self._bump_req_forward_count(batch)
         self.token_to_kv_pool_allocator.free_group_begin()
 
         for idx in range(batch.batch_size()):
@@ -450,6 +476,7 @@ class SchedulerOutputProcessorMixin:
         if result.copy_done is not None:
             result.copy_done.synchronize()
 
+        self._bump_req_forward_count(batch)
         self.token_to_kv_pool_allocator.free_group_begin()
 
         for idx in range(batch.batch_size()):
@@ -490,6 +517,7 @@ class SchedulerOutputProcessorMixin:
         if result.copy_done is not None:
             result.copy_done.synchronize()
 
+        self._bump_req_forward_count(batch)
         logits_output, next_token_ids, can_run_cuda_graph = (
             result.logits_output,
             result.next_token_ids,
@@ -1029,6 +1057,7 @@ class SchedulerOutputProcessorMixin:
                     # because of the one additional delayed token. This "continue" prevented the dummy output.
                     continue
                 req.finished_output = True
+                self._print_req_forward_count(req)
                 if req.finished_len is None:
                     req.finished_len = len(req.output_ids)
                 should_output = True
@@ -1269,6 +1298,7 @@ class SchedulerOutputProcessorMixin:
         retraction_counts = []
         for req in reqs:
             if req.finished():
+                self._print_req_forward_count(req)
                 rids.append(req.rid)
                 http_worker_ipcs.append(req.http_worker_ipc)
                 finished_reasons.append(req.finished_reason.to_json())
