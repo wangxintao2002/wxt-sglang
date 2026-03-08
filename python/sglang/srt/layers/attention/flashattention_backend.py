@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import os
+import sys
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
@@ -42,6 +43,14 @@ logger = logging.getLogger(__name__)
 
 def _dllm_debug_enabled() -> bool:
     return os.getenv("SGLANG_DLLM_DEBUG", "0") == "1"
+
+
+def _dllm_debug(msg: str, *args) -> None:
+    if not _dllm_debug_enabled():
+        return
+    text = msg % args if args else msg
+    logger.warning(text)
+    print(text, file=sys.stderr, flush=True)
 
 
 def _debug_tensor_summary(name: str, value: Optional[torch.Tensor], limit: int = 8) -> str:
@@ -664,7 +673,7 @@ class FlashAttentionBackend(AttentionBackend):
                 metadata.cu_seqlens_q = metadata.cu_seqlens_k
 
             if _dllm_debug_enabled() and forward_batch.forward_mode.is_dllm_extend():
-                logger.warning(
+                _dllm_debug(
                     "DLLM FA metadata: batch_size=%s max_seq_len_q=%s max_seq_len_k=%s "
                     "%s %s %s %s %s",
                     batch_size,
@@ -919,7 +928,7 @@ class FlashAttentionBackend(AttentionBackend):
 
             if _dllm_debug_enabled() and forward_batch.forward_mode.is_dllm_extend():
                 q_view = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
-                logger.warning(
+                _dllm_debug(
                     "DLLM FA call: layer_id=%s q_tokens=%s batch_size=%s page_size=%s "
                     "page_table_shape=%s key_cache_shape=%s value_cache_shape=%s "
                     "%s %s %s %s %s",

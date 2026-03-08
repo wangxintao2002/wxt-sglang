@@ -42,6 +42,7 @@ import dataclasses
 import logging
 import os
 import re
+import sys
 import time
 from enum import Enum, auto
 from functools import lru_cache
@@ -108,6 +109,14 @@ logger = logging.getLogger(__name__)
 
 def _dllm_debug_enabled() -> bool:
     return os.getenv("SGLANG_DLLM_DEBUG", "0") == "1"
+
+
+def _dllm_debug(msg: str, *args) -> None:
+    if not _dllm_debug_enabled():
+        return
+    text = msg % args if args else msg
+    logger.warning(text)
+    print(text, file=sys.stderr, flush=True)
 
 
 @lru_cache(maxsize=1)
@@ -1505,7 +1514,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.extend_num_tokens = extend_num_tokens
 
         if _dllm_debug_enabled() and self.is_dllm():
-            logger.warning(
+            _dllm_debug(
                 "DLLM prepare_for_extend: batch_size=%s extend_num_tokens=%s "
                 "seq_lens=%s prefix_lens=%s extend_lens=%s block_offsets=%s",
                 len(reqs),
@@ -1516,7 +1525,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 [req.dllm_block_offset for req in reqs],
             )
             for idx, req in enumerate(reqs):
-                logger.warning(
+                _dllm_debug(
                     "DLLM req[%s]: rid=%s origin_len=%s output_len=%s fill_len=%s "
                     "prefix_len=%s extend_input_len=%s phase=%s block_offset=%s "
                     "incomplete_len=%s",
