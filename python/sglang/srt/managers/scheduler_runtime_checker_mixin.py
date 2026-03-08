@@ -329,6 +329,7 @@ class SchedulerRuntimeCheckerMixin:
             if queue_size:
                 return
 
+        self.maybe_log_dllm_forward_summary()
         self.check_memory()
         self.check_tree_cache()
         self.new_token_ratio = self.init_new_token_ratio

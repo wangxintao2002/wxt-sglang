@@ -86,6 +86,8 @@ class SchedulerMetricsMixin:
         # The total number of accepted tokens and forward ct for the whole server lifetime
         self.spec_total_num_accepted_tokens = 0
         self.spec_total_num_forward_ct = 0
+        self.dllm_model_forward_counts_finished = []
+        self.dllm_model_forward_summary_pending = False
 
         # For PD disaggregation
         self.kv_transfer_speed_gb_s: float = 0.0
@@ -156,6 +158,40 @@ class SchedulerMetricsMixin:
         self.spec_num_forward_ct = 0
         self.spec_total_num_accepted_tokens = 0
         self.spec_total_num_forward_ct = 0
+        self.dllm_model_forward_counts_finished = []
+        self.dllm_model_forward_summary_pending = False
+
+    def _get_percentile(self, values: list[int], percentile: float) -> int:
+        if not values:
+            return 0
+        idx = round((len(values) - 1) * percentile)
+        idx = min(max(idx, 0), len(values) - 1)
+        return values[idx]
+
+    def maybe_log_dllm_forward_summary(self: Scheduler):
+        if not self.dllm_model_forward_summary_pending:
+            return
+
+        values = sorted(self.dllm_model_forward_counts_finished)
+        if not values:
+            self.dllm_model_forward_summary_pending = False
+            return
+
+        mean_value = sum(values) / len(values)
+        msg = (
+            "[dllm-model-forward-summary] "
+            f"num_reqs={len(values)} "
+            f"mean={mean_value:.2f} "
+            f"min={values[0]} "
+            f"p50={self._get_percentile(values, 0.50)} "
+            f"p95={self._get_percentile(values, 0.95)} "
+            f"p99={self._get_percentile(values, 0.99)} "
+            f"max={values[-1]}"
+        )
+        logger.info(msg)
+
+        self.dllm_model_forward_counts_finished = []
+        self.dllm_model_forward_summary_pending = False
 
     def log_prefill_stats(
         self: Scheduler,

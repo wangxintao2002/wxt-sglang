@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 import time
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
@@ -84,24 +83,15 @@ class SchedulerOutputProcessorMixin:
             return details
         return None
 
-    def _print_req_forward_count(self, req: Req):
+    def _record_req_forward_count(self, req: Req):
         if req.dllm_model_forward_count_logged:
             return
 
         if req.dllm_model_forward_count <= 0:
             return
 
-        print(
-            (
-                "[dllm-model-forward-count] "
-                f"rid={req.rid} "
-                f"forward_count={req.dllm_model_forward_count} "
-                f"input_len={len(req.origin_input_ids)} "
-                f"output_len={len(req.output_ids)}"
-            ),
-            file=sys.stderr,
-            flush=True,
-        )
+        self.dllm_model_forward_counts_finished.append(req.dllm_model_forward_count)
+        self.dllm_model_forward_summary_pending = True
         req.dllm_model_forward_count_logged = True
 
     def process_batch_result_prebuilt(self: Scheduler, batch: ScheduleBatch):
@@ -1050,7 +1040,7 @@ class SchedulerOutputProcessorMixin:
                     # because of the one additional delayed token. This "continue" prevented the dummy output.
                     continue
                 req.finished_output = True
-                self._print_req_forward_count(req)
+                self._record_req_forward_count(req)
                 if req.finished_len is None:
                     req.finished_len = len(req.output_ids)
                 should_output = True
@@ -1291,7 +1281,7 @@ class SchedulerOutputProcessorMixin:
         retraction_counts = []
         for req in reqs:
             if req.finished():
-                self._print_req_forward_count(req)
+                self._record_req_forward_count(req)
                 rids.append(req.rid)
                 http_worker_ipcs.append(req.http_worker_ipc)
                 finished_reasons.append(req.finished_reason.to_json())
