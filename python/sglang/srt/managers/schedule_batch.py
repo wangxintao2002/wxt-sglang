@@ -573,9 +573,9 @@ class Req(ReqDllmMixin):
         self.output_ids = []
         # fill_ids = origin_input_ids + output_ids. Updated if chunked.
         self.fill_ids = []
-        # Number of forward passes this request has participated in.
-        self.forward_count = 0
-        self.forward_count_logged = False
+        # Number of DLLM model_runner.forward calls this request has participated in.
+        self.dllm_model_forward_count = 0
+        self.dllm_model_forward_count_logged = False
         self.session_id = session_id
         self.input_embeds = input_embeds
 

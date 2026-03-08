@@ -100,6 +100,7 @@ class LowConfidenceFDFO(DllmAlgorithm):
     ]:
         # Forward pass through the model (no preprocessing needed)
         # each block may contain mask or finished tokens
+        self.record_model_forward_count(forward_batch)
         out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
         logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
 

@@ -13,6 +13,12 @@ class DllmAlgorithm:
         self.block_size = config.block_size
         self.mask_id = config.mask_id
 
+    def record_model_forward_count(self, forward_batch):
+        if getattr(forward_batch, "reqs", None) is None:
+            return
+        for req in forward_batch.reqs:
+            req.dllm_model_forward_count += 1
+
     @staticmethod
     def from_server_args(server_args: ServerArgs):
         config = DllmConfig.from_server_args(server_args)

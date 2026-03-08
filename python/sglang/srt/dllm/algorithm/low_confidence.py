@@ -33,6 +33,7 @@ class LowConfidence(DllmAlgorithm):
 
         # Fast path: if there is no mask token, forward and save kv cache
         if torch.sum(mask_index).item() == 0:
+            self.record_model_forward_count(forward_batch)
             out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
             logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
 
@@ -53,6 +54,7 @@ class LowConfidence(DllmAlgorithm):
             if torch.sum(mask_index).item() == 0:
                 break
 
+            self.record_model_forward_count(forward_batch)
             out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
             logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
             assert batch_size == forward_batch.input_ids.shape[0] // self.block_size
@@ -89,6 +91,7 @@ class LowConfidence(DllmAlgorithm):
 
                 block_input_ids[transfer_index] = x[transfer_index]
 
+        self.record_model_forward_count(forward_batch)
         out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
         logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
         # Here next token ids is tricky to implement the dynamic lengths,
