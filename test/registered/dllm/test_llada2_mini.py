@@ -23,7 +23,7 @@ from sglang.test.test_utils import (
 class TestLLaDA2Mini(CustomTestCase):
     @classmethod
     def setUpClass(cls):
-        cls.model = "inclusionAI/LLaDA2.0-mini"
+        cls.model = "/home/wxt/LLaDA2.0-mini"
         cls.base_url = DEFAULT_URL_FOR_TEST
 
         other_args = [
@@ -33,7 +33,7 @@ class TestLLaDA2Mini(CustomTestCase):
             "--mem-fraction-static",
             "0.9",
             "--max-running-requests",
-            "4",
+            "16",
             "--attention-backend",
             "flashinfer",
             "--dllm-algorithm",

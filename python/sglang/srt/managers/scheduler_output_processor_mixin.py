@@ -390,7 +390,7 @@ class SchedulerOutputProcessorMixin:
             len_cur_tokens = len(next_token_ids)
             
             if result.accept_length_per_req_cpu[idx] == 0:
-                req.incomplete_ids = next_token_ids
+                req.dllm_incomplete_ids = next_token_ids
                 old_prefix_len = (
                     len(req.prefix_indices)
                     if hasattr(req, "prefix_indices") and req.prefix_indices is not None

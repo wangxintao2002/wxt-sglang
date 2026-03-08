@@ -3,6 +3,7 @@ import sglang as sgl
 def main():
     llm = sgl.Engine(model_path="/home/wxt/LLaDA2.0-mini",
                      dllm_algorithm="LowConfidenceFDFO",
+                     attention_backend="flashinfer",
                      max_running_requests=1, disable_cuda_graph=True,
                      trust_remote_code=True)
 
