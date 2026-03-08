@@ -56,15 +56,20 @@ class ReqDllmMixin:
             self.dllm_phase = DllmReqPhase.STAGING_DECODE
 
     def _init_fill_ids_for_dllm(self: Req):
+        len_prefix = len(self.prefix_indices)
         block_size = self.dllm_config.block_size
         if not self.dllm_ids:
             padding = (-len(self.origin_input_ids)) % block_size
             self.dllm_ids = self.origin_input_ids + [self.dllm_config.mask_id] * padding
             self.fill_ids = self.dllm_ids[:block_size]
         elif self.dllm_incomplete_ids:
-            self.dllm_ids += self.dllm_incomplete_ids
+            self.fill_ids = self.fill_ids[:len_prefix] + self.dllm_incomplete_ids
         else:
-            self.dllm_block_offset += self.dllm_config.block_size
-            self.dllm_ids += [self.dllm_config.mask_id] * self.block_size
-
-        self.fill_ids = self.dllm_ids
+            self.dllm_block_offset += block_size
+            fill_len, dllm_len = len(self.fill_ids), len(self.dllm_ids)
+            if fill_len < dllm_len:
+                # prefill
+                self.fill_ids += self.dllm_ids[fill_len : fill_len + block_size]
+            else:
+                # decode
+                self.fill_ids += [self.dllm_config.mask_id] * block_size

@@ -68,8 +68,8 @@ class DllmConfig:
             # Parse common algorithm configurations
             block_size = algorithm_config.get("block_size", block_size)
 
-            from sglang.srt.dllm.algorithm import get_algorithm_fdfo_requirement
-            enable_fdfo = get_algorithm_fdfo_requirement(server_args.dllm_algorithm)
+        from sglang.srt.dllm.algorithm import get_algorithm_fdfo_requirement
+        enable_fdfo = get_algorithm_fdfo_requirement(server_args.dllm_algorithm)
 
         return DllmConfig(
             algorithm=server_args.dllm_algorithm,
