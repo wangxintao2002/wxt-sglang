@@ -20,6 +20,7 @@ class ReqDllmMixin:
     def init_diffusion_llm(self: Req, dllm_config: DllmConfig):
         self.dllm_phase: Optional[DllmReqPhase] = None
         self.dllm_ids = []
+        self.dllm_incomplete_ids = []
         self.dllm_block_offset = 0
         self.dllm_config = dllm_config
 
@@ -55,13 +56,15 @@ class ReqDllmMixin:
             self.dllm_phase = DllmReqPhase.STAGING_DECODE
 
     def _init_fill_ids_for_dllm(self: Req):
+        block_size = self.dllm_config.block_size
         if not self.dllm_ids:
-            self.dllm_ids = (
-                self.origin_input_ids
-                + [self.dllm_config.mask_id] * self.dllm_config.block_size
-            )
+            padding = (-len(self.origin_input_ids)) % block_size
+            self.dllm_ids = self.origin_input_ids + [self.dllm_config.mask_id] * padding
+            self.fill_ids = self.dllm_ids[:block_size]
+        elif self.dllm_incomplete_ids:
+            self.dllm_ids += self.dllm_incomplete_ids
         else:
             self.dllm_block_offset += self.dllm_config.block_size
-            self.dllm_ids += [self.dllm_config.mask_id] * self.dllm_config.block_size
+            self.dllm_ids += [self.dllm_config.mask_id] * self.block_size
 
         self.fill_ids = self.dllm_ids

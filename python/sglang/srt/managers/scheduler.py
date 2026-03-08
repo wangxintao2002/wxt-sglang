@@ -1883,8 +1883,10 @@ class Scheduler(
 
         if self.dllm_config is not None and self.dllm_manager.any_staging_reqs():
             chunked_req_to_exclude.update(self.dllm_manager.staging_queue)
+            # 对于存在 incomplete ids 的请求，不能将该 incomplete block 写入 cache
             for req in self.dllm_manager.staging_queue:
-                self.stash_chunked_request(req)
+                if not req.dllm_incomplete_ids:
+                    self.stash_chunked_request(req)
 
         if self.chunked_req is not None:
             # Move the chunked request out of the batch so that we can merge
@@ -2454,7 +2456,10 @@ class Scheduler(
             trace_slice_batch(RequestStage.DECODE_LOOP, batch.reqs)
         elif batch.forward_mode.is_extend():
             if batch.is_dllm():
-                self.process_batch_result_dllm(batch, result)
+                if self.dllm_config.enable_fdfo:
+                    self.process_batch_result_dllm_fdfo(batch, result)
+                else:
+                    self.process_batch_result_dllm(batch, result)
             else:
                 self.process_batch_result_prefill(batch, result)
         elif batch.forward_mode.is_prebuilt():

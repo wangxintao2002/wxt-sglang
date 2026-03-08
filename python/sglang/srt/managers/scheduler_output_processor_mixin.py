@@ -374,6 +374,74 @@ class SchedulerOutputProcessorMixin:
             batch.reqs, batch.return_logprob, is_idle_batch=True
         )
 
+    def process_batch_result_dllm_fdfo(
+        self: Scheduler,
+        batch: ScheduleBatch,
+        result: GenerationBatchResult,
+    ):
+        if result.copy_done is not None:
+            result.copy_done.synchronize()
+
+        self.token_to_kv_pool_allocator.free_group_begin()
+
+        for idx in range(batch.batch_size()):
+            req = batch.reqs[idx]
+            next_token_ids = result.next_token_ids[idx]
+            len_cur_tokens = len(next_token_ids)
+            
+            if result.accept_length_per_req_cpu[idx] == 0:
+                req.incomplete_ids = next_token_ids
+                old_prefix_len = (
+                    len(req.prefix_indices)
+                    if hasattr(req, "prefix_indices") and req.prefix_indices is not None
+                    else 0
+                )
+
+                new_fill_len = len(req.fill_ids)
+                # 释放 incomplete_ids 对应的 kv 缓存，因为里面包含 mask id
+                if new_fill_len > old_prefix_len:
+                    kv_indices_to_free = batch.req_to_token_pool.req_to_token[
+                        req.req_pool_idx, old_prefix_len:new_fill_len
+                    ]
+                    self.token_to_kv_pool_allocator.free(kv_indices_to_free)
+                continue
+                
+            req.dllm_incomplete_ids = []
+            len_input = len(req.origin_input_ids)
+            len_fill = len(req.fill_ids)
+
+            if len_fill < len_input:
+                # 如果 fill_ids 长度小于 origin_input_ids 长度，说明 prefill 还没完成，跳过
+                continue
+
+            if len_fill - len_cur_tokens < len_input:
+                # 边界情况，区分 prefill 的 decode token
+                next_token_ids = next_token_ids[len_input - len_fill: ]
+            self.num_generated_tokens += len_cur_tokens
+
+            finished = False
+            for next_token_id in next_token_ids:
+                req.output_ids.append(next_token_id)
+                req.check_finished()
+                if req.finished():
+                    release_kv_cache(req, self.tree_cache)
+                    req.time_stats.completion_time = time.perf_counter()
+                    finished = True
+                    break
+            if not finished:
+                self.tree_cache.cache_unfinished_req(req)
+            
+        self.stream_output(batch.reqs, batch.return_logprob)
+        self.token_to_kv_pool_allocator.free_group_end()
+
+        if self.current_scheduler_metrics_enabled:
+            can_run_cuda_graph = getattr(result, "can_run_cuda_graph", False)
+            self.log_prefill_stats(
+                prefill_stats=batch.prefill_stats,
+                can_run_cuda_graph=can_run_cuda_graph,
+                dp_cooperation_info=batch.dp_cooperation_info,
+            )
+
     def process_batch_result_dllm(
         self: Scheduler,
         batch: ScheduleBatch,

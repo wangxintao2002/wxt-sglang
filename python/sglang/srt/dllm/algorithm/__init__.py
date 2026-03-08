@@ -34,6 +34,11 @@ def get_algorithm(config: DllmConfig):
         return algo_name_to_cls[name](config)
     except:
         raise RuntimeError(f"Unknown diffusion LLM algorithm: {name}")
+    
+def get_algorithm_fdfo_requirement(algorithm_name: str) -> bool:
+    if algorithm_name in algo_name_to_cls:
+        return getattr(algo_name_to_cls[algorithm_name], "requires_fdfo_mode", False)
+    return False
 
 
 algo_name_to_cls = import_algorithms()
