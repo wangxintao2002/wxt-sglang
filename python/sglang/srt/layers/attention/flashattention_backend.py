@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+import os
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
@@ -34,6 +36,25 @@ from sglang.jit_kernel.flash_attention_v4 import (
 from sglang.jit_kernel.flash_attention_v4 import (
     flash_attn_with_kvcache as flash_attn_with_kvcache_fa4,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _dllm_debug_enabled() -> bool:
+    return os.getenv("SGLANG_DLLM_DEBUG", "0") == "1"
+
+
+def _debug_tensor_summary(name: str, value: Optional[torch.Tensor], limit: int = 8) -> str:
+    if value is None:
+        return f"{name}=None"
+    if not isinstance(value, torch.Tensor):
+        return f"{name}={value}"
+    shape = tuple(value.shape)
+    if value.numel() == 0:
+        return f"{name}.shape={shape} values=[]"
+    flat = value.detach().cpu().reshape(-1)
+    preview = flat[: min(limit, flat.numel())].tolist()
+    return f"{name}.shape={shape} values={preview}"
 
 
 @dataclass
@@ -642,6 +663,24 @@ class FlashAttentionBackend(AttentionBackend):
                 metadata.max_seq_len_q = metadata.max_seq_len_k
                 metadata.cu_seqlens_q = metadata.cu_seqlens_k
 
+            if _dllm_debug_enabled() and forward_batch.forward_mode.is_dllm_extend():
+                logger.warning(
+                    "DLLM FA metadata: batch_size=%s max_seq_len_q=%s max_seq_len_k=%s "
+                    "%s %s %s %s %s",
+                    batch_size,
+                    metadata.max_seq_len_q,
+                    metadata.max_seq_len_k,
+                    _debug_tensor_summary("seq_lens", forward_batch.seq_lens_cpu),
+                    _debug_tensor_summary(
+                        "extend_seq_lens", forward_batch.extend_seq_lens
+                    ),
+                    _debug_tensor_summary(
+                        "extend_prefix_lens", forward_batch.extend_prefix_lens
+                    ),
+                    _debug_tensor_summary("cu_seqlens_q", metadata.cu_seqlens_q),
+                    _debug_tensor_summary("cu_seqlens_k", metadata.cu_seqlens_k),
+                )
+
             # Setup local attention if enabled
             if forward_batch.forward_mode == ForwardMode.EXTEND:
                 self._maybe_init_local_attn_metadata(forward_batch, metadata, device)
@@ -878,8 +917,30 @@ class FlashAttentionBackend(AttentionBackend):
                 cu_seqlens_k = metadata.encoder_cu_seqlens_k
                 window_size = (-1, -1)
 
+            if _dllm_debug_enabled() and forward_batch.forward_mode.is_dllm_extend():
+                q_view = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
+                logger.warning(
+                    "DLLM FA call: layer_id=%s q_tokens=%s batch_size=%s page_size=%s "
+                    "page_table_shape=%s key_cache_shape=%s value_cache_shape=%s "
+                    "%s %s %s %s %s",
+                    layer.layer_id,
+                    q_view.shape[0],
+                    forward_batch.batch_size,
+                    self.page_size,
+                    tuple(page_table.shape) if page_table is not None else None,
+                    tuple(key_cache.shape),
+                    tuple(value_cache.shape),
+                    _debug_tensor_summary("cache_seqlens", cache_seqlens),
+                    _debug_tensor_summary("cu_seqlens_q", cu_seqlens_q),
+                    _debug_tensor_summary("cu_seqlens_k", cu_seqlens_k),
+                    _debug_tensor_summary("seq_lens", forward_batch.seq_lens_cpu),
+                    _debug_tensor_summary(
+                        "extend_prefix_lens", forward_batch.extend_prefix_lens
+                    ),
+                )
+
             result = flash_attn_with_kvcache(
-                q=q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),
+                q=q_view if _dllm_debug_enabled() and forward_batch.forward_mode.is_dllm_extend() else q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),
                 k_cache=key_cache,
                 v_cache=value_cache,
                 page_table=page_table,

@@ -40,6 +40,7 @@ TODO(lmzheng): ModelWorkerBatch seems a bit redundant and we consider removing i
 import copy
 import dataclasses
 import logging
+import os
 import re
 import time
 from enum import Enum, auto
@@ -103,6 +104,10 @@ INIT_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 MM_PAD_SHIFT_VALUE = 1_000_000
 
 logger = logging.getLogger(__name__)
+
+
+def _dllm_debug_enabled() -> bool:
+    return os.getenv("SGLANG_DLLM_DEBUG", "0") == "1"
 
 
 @lru_cache(maxsize=1)
@@ -1498,6 +1503,34 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.seq_lens = seq_lens_tensor
         self.seq_lens_cpu = seq_lens_cpu
         self.extend_num_tokens = extend_num_tokens
+
+        if _dllm_debug_enabled() and self.is_dllm():
+            logger.warning(
+                "DLLM prepare_for_extend: batch_size=%s extend_num_tokens=%s "
+                "seq_lens=%s prefix_lens=%s extend_lens=%s block_offsets=%s",
+                len(reqs),
+                extend_num_tokens,
+                seq_lens,
+                prefix_lens,
+                extend_lens,
+                [req.dllm_block_offset for req in reqs],
+            )
+            for idx, req in enumerate(reqs):
+                logger.warning(
+                    "DLLM req[%s]: rid=%s origin_len=%s output_len=%s fill_len=%s "
+                    "prefix_len=%s extend_input_len=%s phase=%s block_offset=%s "
+                    "incomplete_len=%s",
+                    idx,
+                    req.rid,
+                    len(req.origin_input_ids),
+                    len(req.output_ids),
+                    len(req.fill_ids),
+                    len(req.prefix_indices),
+                    req.extend_input_len,
+                    getattr(req, "dllm_phase", None),
+                    getattr(req, "dllm_block_offset", None),
+                    len(getattr(req, "dllm_incomplete_ids", [])),
+                )
 
         # Allocate memory
         out_cache_loc, req_pool_indices_tensor, req_pool_indices = alloc_for_extend(
