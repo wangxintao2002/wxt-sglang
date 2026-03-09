@@ -108,24 +108,20 @@ class SchedulerDllmMixin:
         """Process prefill or decode batches for DLLM."""
         forward_mode = ForwardMode.DLLM_EXTEND
 
-        # Try prefill batch first
-        prefill_reqs = self.dllm_manager.get_prefill_requests()
-        if prefill_reqs:
-            self._process_batch_by_phase(
-                adder,
-                prefill_reqs,
-                DllmReqPhase.STAGING_PREFILL,
-                DllmReqPhase.INCOMING_PREFILL,
-            )
-        else:
-            # Fall back to decode batch
-            decode_reqs = self.dllm_manager.get_decode_requests()
-            self._process_batch_by_phase(
-                adder,
-                decode_reqs,
-                DllmReqPhase.STAGING_DECODE,
-                DllmReqPhase.INCOMING_DECODE,
-            )
+        # Decode first
+        self._process_batch_by_phase(
+            adder,
+            self.dllm_manager.get_decode_requests(),
+            DllmReqPhase.STAGING_DECODE,
+            DllmReqPhase.INCOMING_DECODE,
+        )
+
+        self._process_batch_by_phase(
+            adder,
+            self.dllm_manager.get_prefill_requests(),
+            DllmReqPhase.STAGING_PREFILL,
+            DllmReqPhase.INCOMING_PREFILL,
+        )
 
         return forward_mode
 
