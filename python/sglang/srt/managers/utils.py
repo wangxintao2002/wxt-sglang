@@ -49,6 +49,12 @@ class GenerationBatchResult:
     # metrics
     expert_distribution_metrics: Optional[ExpertDistributionMetrics] = None
 
+    # DLLM instrumentation
+    dllm_block_iterations: Optional[List[int]] = None
+    dllm_max_block_iterations: Optional[int] = None
+    dllm_postprocess_ms: Optional[float] = None
+    dllm_model_forward_ms: Optional[float] = None
+
     def copy_to_cpu(self, return_logprob: bool):
         """Copy tensors to CPU in overlap scheduling.
         Only the tensors which are needed for processing results are copied,

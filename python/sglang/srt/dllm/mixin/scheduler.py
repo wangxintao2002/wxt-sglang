@@ -27,11 +27,15 @@ class SchedulerDllmMixin:
 
     def get_new_batch_dllm(self: Scheduler) -> Optional[ScheduleBatch]:
         """Generate a new batch for DLLM (Diffusion LLM) scheduling."""
+        import torch.cuda.nvtx as nvtx
+
+        nvtx.range_push("dllm::scheduler::get_new_batch_dllm")
         if self.try_preemption:
             self.running_batch.batch_is_full = False
 
         # Early exit if batch is full or no requests available
         if self._should_skip_prefill():
+            nvtx.range_pop()  # get_new_batch_dllm
             return None
 
         running_bs = len(self.running_batch.reqs)
@@ -49,6 +53,7 @@ class SchedulerDllmMixin:
 
         can_run_list = adder.can_run_list
         if not can_run_list:
+            nvtx.range_pop()  # get_new_batch_dllm
             return None
 
         # Record metrics and update state
@@ -56,6 +61,7 @@ class SchedulerDllmMixin:
 
         # Create and prepare batch
         new_batch = self._create_dllm_batch(can_run_list, forward_mode)
+        nvtx.range_pop()  # get_new_batch_dllm
         return new_batch
 
     def _fetch_waiting_reqs(self: Scheduler):
@@ -175,6 +181,20 @@ class SchedulerDllmMixin:
         self: Scheduler, can_run_list: List[Req], forward_mode: ForwardMode
     ) -> ScheduleBatch:
         """Create and prepare a new DLLM batch."""
+        decode_round_counts = []
+        now = time.perf_counter()
+        for req in can_run_list:
+            if req.dllm_phase in [
+                DllmReqPhase.STAGING_DECODE,
+                DllmReqPhase.INCOMING_DECODE,
+            ]:
+                if req.dllm_metric_decode_block_offset != req.dllm_block_offset:
+                    req.dllm_metric_decode_block_offset = req.dllm_block_offset
+                    req.dllm_metric_decode_block_start_ts = now
+                    req.dllm_metric_decode_block_rounds = 0
+                req.dllm_metric_decode_block_rounds += 1
+                decode_round_counts.append(req.dllm_metric_decode_block_rounds)
+
         new_batch = ScheduleBatch.init_new(
             can_run_list,
             self.req_to_token_pool,
@@ -188,6 +208,13 @@ class SchedulerDllmMixin:
         new_batch.prepare_for_extend()
         new_batch.forward_mode = forward_mode
         new_batch.decoding_reqs = None
+        new_batch.dllm_metric_max_decode_rounds = (
+            max(decode_round_counts) if decode_round_counts else 0
+        )
+        new_batch.dllm_metric_num_decode_reqs = len(decode_round_counts)
+        new_batch.dllm_metric_num_prefill_reqs = len(can_run_list) - len(
+            decode_round_counts
+        )
 
         # Record prefill stats for logging after forward
         from sglang.srt.managers.scheduler_metrics_mixin import PrefillStats

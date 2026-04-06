@@ -413,15 +413,29 @@ class TpModelWorker(BaseTpWorker):
     def _forward_batch_generation_dllm(
         self, forward_batch: ForwardBatch
     ) -> GenerationBatchResult:
-        logits_output, next_token_ids, accept_length_per_req_cpu, can_run_cuda_graph = self.dllm_algorithm.run(
-            self.model_runner, forward_batch
-        )
-        return GenerationBatchResult(
+        import torch.cuda.nvtx as nvtx
+
+        nvtx.range_push("dllm::tp_worker::forward_dllm")
+        algo_ret = self.dllm_algorithm.run(self.model_runner, forward_batch)
+        (
+            logits_output,
+            next_token_ids,
+            accept_length_per_req_cpu,
+            can_run_cuda_graph,
+        ) = algo_ret
+        nvtx.range_pop()
+        result = GenerationBatchResult(
             logits_output=logits_output,
             next_token_ids=next_token_ids,
             can_run_cuda_graph=can_run_cuda_graph,
             accept_length_per_req_cpu=accept_length_per_req_cpu,
         )
+        if self.server_args.dllm_algorithm == "LowConfidence":
+            result.dllm_block_iterations = accept_length_per_req_cpu
+            result.dllm_max_block_iterations = (
+                max(accept_length_per_req_cpu) if accept_length_per_req_cpu else 0
+            )
+        return result
 
     def get_remote_instance_transfer_engine_info(self):
         return (

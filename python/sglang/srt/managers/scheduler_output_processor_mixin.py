@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 
+from sglang.srt.dllm.instrumentation import record_dllm_event
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
@@ -36,6 +37,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_FORCE_STREAM_INTERVAL = 50
+
+
+def _round_bucket(rounds: int) -> str:
+    if rounds <= 1:
+        return "1"
+    if rounds <= 4:
+        return "2_4"
+    return "5_plus"
 
 
 class SchedulerOutputProcessorMixin:
@@ -379,6 +388,9 @@ class SchedulerOutputProcessorMixin:
         batch: ScheduleBatch,
         result: GenerationBatchResult,
     ):
+        import torch.cuda.nvtx as nvtx
+
+        nvtx.range_push("dllm::output::process_fdfo")
         if result.copy_done is not None:
             result.copy_done.synchronize()
 
@@ -419,6 +431,42 @@ class SchedulerOutputProcessorMixin:
                 next_token_ids = next_token_ids[len_input - len_fill: ]
             self.num_generated_tokens += len_cur_tokens
 
+            if (
+                req.dllm_metric_decode_block_offset == req.dllm_block_offset
+                and req.dllm_metric_decode_block_start_ts is not None
+            ):
+                rounds = req.dllm_metric_decode_block_rounds
+                latency_ms = (
+                    time.perf_counter() - req.dllm_metric_decode_block_start_ts
+                ) * 1000
+                slowest_bucket = _round_bucket(
+                    getattr(batch, "dllm_metric_max_decode_rounds", rounds)
+                )
+                record_dllm_event(
+                    "dllm_decode_block_completed",
+                    algo="LowConfidenceFDFO",
+                    rid=req.rid,
+                    block_offset=req.dllm_block_offset,
+                    rounds_to_completion=rounds,
+                    round_bucket=_round_bucket(rounds),
+                    block_completion_latency_ms=latency_ms,
+                    output_tokens=len(next_token_ids),
+                    slowest_round_bucket=slowest_bucket,
+                    is_fast_block=rounds == 1,
+                )
+                if rounds == 1:
+                    record_dllm_event(
+                        "dllm_fast_block_latency",
+                        algo="LowConfidenceFDFO",
+                        rid=req.rid,
+                        block_offset=req.dllm_block_offset,
+                        latency_ms=latency_ms,
+                        slowest_round_bucket=slowest_bucket,
+                    )
+                req.dllm_metric_decode_block_offset = None
+                req.dllm_metric_decode_block_start_ts = None
+                req.dllm_metric_decode_block_rounds = 0
+
             finished = False
             for next_token_id in next_token_ids:
                 req.output_ids.append(next_token_id)
@@ -426,6 +474,19 @@ class SchedulerOutputProcessorMixin:
                 if req.finished():
                     release_kv_cache(req, self.tree_cache)
                     req.time_stats.completion_time = time.perf_counter()
+                    queue_entry = req.time_stats.wait_queue_entry_time
+                    completion_latency_ms = (
+                        (req.time_stats.completion_time - queue_entry) * 1000
+                        if queue_entry
+                        else None
+                    )
+                    record_dllm_event(
+                        "dllm_request_completed",
+                        algo="LowConfidenceFDFO",
+                        rid=req.rid,
+                        output_tokens=len(req.output_ids),
+                        completion_latency_ms=completion_latency_ms,
+                    )
                     finished = True
                     break
             if not finished:
@@ -441,12 +502,16 @@ class SchedulerOutputProcessorMixin:
                 can_run_cuda_graph=can_run_cuda_graph,
                 dp_cooperation_info=batch.dp_cooperation_info,
             )
+        nvtx.range_pop()  # process_fdfo
 
     def process_batch_result_dllm(
         self: Scheduler,
         batch: ScheduleBatch,
         result: GenerationBatchResult,
     ):
+        import torch.cuda.nvtx as nvtx
+
+        nvtx.range_push("dllm::output::process_dllm")
         if result.copy_done is not None:
             result.copy_done.synchronize()
 
@@ -460,6 +525,43 @@ class SchedulerOutputProcessorMixin:
             req = batch.reqs[idx]
             next_token_ids = result.next_token_ids[idx].tolist()
             self.num_generated_tokens += len(next_token_ids)
+            block_iterations = (
+                result.dllm_block_iterations[idx]
+                if result.dllm_block_iterations is not None
+                else 1
+            )
+            if (
+                req.dllm_metric_decode_block_offset == req.dllm_block_offset
+                and req.dllm_metric_decode_block_start_ts is not None
+            ):
+                latency_ms = (
+                    time.perf_counter() - req.dllm_metric_decode_block_start_ts
+                ) * 1000
+                slowest_bucket = _round_bucket(result.dllm_max_block_iterations or 1)
+                record_dllm_event(
+                    "dllm_decode_block_completed",
+                    algo="LowConfidence",
+                    rid=req.rid,
+                    block_offset=req.dllm_block_offset,
+                    rounds_to_completion=block_iterations,
+                    round_bucket=_round_bucket(block_iterations),
+                    block_completion_latency_ms=latency_ms,
+                    output_tokens=len(next_token_ids),
+                    slowest_round_bucket=slowest_bucket,
+                    is_fast_block=block_iterations == 1,
+                )
+                if block_iterations == 1:
+                    record_dllm_event(
+                        "dllm_fast_block_latency",
+                        algo="LowConfidence",
+                        rid=req.rid,
+                        block_offset=req.dllm_block_offset,
+                        latency_ms=latency_ms,
+                        slowest_round_bucket=slowest_bucket,
+                    )
+                req.dllm_metric_decode_block_offset = None
+                req.dllm_metric_decode_block_start_ts = None
+                req.dllm_metric_decode_block_rounds = 0
 
             for _token_idx, next_token_id in enumerate(next_token_ids):
                 req.output_ids.append(next_token_id)
@@ -467,6 +569,19 @@ class SchedulerOutputProcessorMixin:
                 if req.finished():
                     release_kv_cache(req, self.tree_cache)
                     req.time_stats.completion_time = time.perf_counter()
+                    queue_entry = req.time_stats.wait_queue_entry_time
+                    completion_latency_ms = (
+                        (req.time_stats.completion_time - queue_entry) * 1000
+                        if queue_entry
+                        else None
+                    )
+                    record_dllm_event(
+                        "dllm_request_completed",
+                        algo="LowConfidence",
+                        rid=req.rid,
+                        output_tokens=len(req.output_ids),
+                        completion_latency_ms=completion_latency_ms,
+                    )
                     break
 
                 self.tree_cache.cache_unfinished_req(req)
@@ -481,6 +596,7 @@ class SchedulerOutputProcessorMixin:
                 can_run_cuda_graph=can_run_cuda_graph,
                 dp_cooperation_info=batch.dp_cooperation_info,
             )
+        nvtx.range_pop()  # process_dllm
 
     def process_batch_result_decode(
         self: Scheduler,

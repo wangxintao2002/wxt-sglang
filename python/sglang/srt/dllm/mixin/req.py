@@ -23,6 +23,9 @@ class ReqDllmMixin:
         self.dllm_incomplete_ids = []
         self.dllm_block_offset = 0
         self.dllm_config = dllm_config
+        self.dllm_metric_decode_block_offset: Optional[int] = None
+        self.dllm_metric_decode_block_start_ts: Optional[float] = None
+        self.dllm_metric_decode_block_rounds = 0
 
         if self.dllm_config is not None:
             if len(self.origin_input_ids) < self.dllm_config.block_size:

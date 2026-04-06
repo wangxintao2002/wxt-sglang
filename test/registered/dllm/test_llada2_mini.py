@@ -3,6 +3,7 @@ from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
 register_cuda_ci(est_time=181, suite="stage-b-test-large-1-gpu")
 register_amd_ci(est_time=330, suite="stage-b-test-small-1-gpu-amd")
 
+import os
 import unittest
 from types import SimpleNamespace
 
@@ -25,6 +26,9 @@ class TestLLaDA2Mini(CustomTestCase):
     def setUpClass(cls):
         cls.model = "/home/wxt/LLaDA2.0-mini"
         cls.base_url = DEFAULT_URL_FOR_TEST
+        cls.dllm_algorithm = os.getenv("SGLANG_TEST_DLLM_ALGORITHM", "LowConfidenceFDFO")
+        cls.skip_perf_assert = os.getenv("SGLANG_TEST_SKIP_PERF_ASSERT") == "1"
+        cls.data_path = os.getenv("SGLANG_TEST_GSM8K_DATA_PATH")
 
         other_args = [
             "--trust-remote-code",
@@ -37,7 +41,7 @@ class TestLLaDA2Mini(CustomTestCase):
             "--attention-backend",
             "flashinfer",
             "--dllm-algorithm",
-            "LowConfidence",
+            cls.dllm_algorithm,
             "--cuda-graph-bs",
             "1",
             "2",
@@ -45,11 +49,16 @@ class TestLLaDA2Mini(CustomTestCase):
             "4",
         ]
 
+        env = {}
+        if (x := os.getenv("SGLANG_DLLM_TRACE_PATH")) is not None:
+            env["SGLANG_DLLM_TRACE_PATH"] = x
+
         cls.process = popen_launch_server(
             cls.model,
             cls.base_url,
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
             other_args=other_args,
+            env=env,
         )
 
     @classmethod
@@ -59,7 +68,7 @@ class TestLLaDA2Mini(CustomTestCase):
     def test_gsm8k(self):
         args = SimpleNamespace(
             num_shots=5,
-            data_path=None,
+            data_path=self.data_path,
             num_questions=200,
             max_new_tokens=512,
             parallel=128,
@@ -70,10 +79,11 @@ class TestLLaDA2Mini(CustomTestCase):
         print(f"{metrics=}")
 
         self.assertGreater(metrics["accuracy"], 0.88)
-        if is_in_amd_ci():
-            self.assertGreater(metrics["output_throughput"], 80)
-        else:
-            self.assertGreater(metrics["output_throughput"], 250)
+        if not self.skip_perf_assert:
+            if is_in_amd_ci():
+                self.assertGreater(metrics["output_throughput"], 80)
+            else:
+                self.assertGreater(metrics["output_throughput"], 250)
 
     def test_bs_1_speed(self):
         args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
@@ -83,13 +93,14 @@ class TestLLaDA2Mini(CustomTestCase):
 
         if is_in_ci():
             write_github_step_summary(
-                f"### test_bs_1_speed (llada2-mini) with tp1\n"
+                f"### test_bs_1_speed (llada2-mini, {self.dllm_algorithm}) with tp1\n"
                 f"{speed=:.2f} token/s\n"
             )
-            if is_in_amd_ci():
-                self.assertGreater(speed, 10)
-            else:
-                self.assertGreater(speed, 250)
+            if not self.skip_perf_assert:
+                if is_in_amd_ci():
+                    self.assertGreater(speed, 10)
+                else:
+                    self.assertGreater(speed, 250)
 
 
 if __name__ == "__main__":

@@ -58,6 +58,7 @@ from sglang.srt.disaggregation.utils import (
 )
 from sglang.srt.distributed import get_pp_group, get_world_group
 from sglang.srt.distributed.parallel_state import get_tp_group
+from sglang.srt.dllm.instrumentation import record_dllm_event
 from sglang.srt.dllm.mixin.scheduler import SchedulerDllmMixin
 from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
@@ -689,7 +690,6 @@ class Scheduler(
 
                 self.tree_cache = SWAChunkCache(params)
         else:
-
             if envs.SGLANG_EXPERIMENTAL_CPP_RADIX_TREE.get():
                 # lazy import to avoid JIT overhead
                 from sglang.srt.mem_cache.radix_cache_cpp import RadixCacheCpp
@@ -1313,7 +1313,6 @@ class Scheduler(
         ):
             recv_reqs, abort_reqs = self.mm_receiver.process_waiting_requests(recv_reqs)
             for req, error_msg, error_code in abort_reqs:
-
                 status_code = (
                     HTTPStatus.BAD_REQUEST
                     if error_code == 400
@@ -1873,6 +1872,9 @@ class Scheduler(
         self.tree_cache.cache_unfinished_req(req, chunked=True)
 
     def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
+        import torch.cuda.nvtx as nvtx
+
+        nvtx.range_push("dllm::scheduler::get_next_batch")
         self._abort_on_waiting_timeout()
         self._abort_on_running_timeout()
         if self.dllm_config is not None:
@@ -1951,6 +1953,7 @@ class Scheduler(
         if ret:
             trace_event_batch("schedule", ret.reqs)
 
+        nvtx.range_pop()  # get_next_batch
         return ret
 
     def get_num_allocatable_reqs(self, running_bs):
@@ -2283,6 +2286,10 @@ class Scheduler(
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
         """Run a batch."""
+        import torch.cuda.nvtx as nvtx
+
+        nvtx.range_push("dllm::scheduler::run_batch")
+        run_batch_t0 = time.perf_counter()
         self.forward_ct += 1
 
         # Whether to run the profiler
@@ -2299,6 +2306,7 @@ class Scheduler(
 
         # Place holder handling for pd-disagg decode event loop
         if batch.forward_mode.is_prebuilt():
+            nvtx.range_pop()  # run_batch
             return self._run_batch_prebuilt(batch)
 
         # Run forward
@@ -2429,6 +2437,18 @@ class Scheduler(
                 ActiveRanksOutput(status=dp_active_ranks.tolist())
             )
 
+        if batch.is_dllm():
+            record_dllm_event(
+                "dllm_run_batch",
+                algo=self.server_args.dllm_algorithm,
+                run_batch_ms=(time.perf_counter() - run_batch_t0) * 1000,
+                batch_size=batch.batch_size(),
+                num_decode_reqs=getattr(batch, "dllm_metric_num_decode_reqs", 0),
+                num_prefill_reqs=getattr(batch, "dllm_metric_num_prefill_reqs", 0),
+                max_decode_rounds=getattr(batch, "dllm_metric_max_decode_rounds", 0),
+            )
+
+        nvtx.range_pop()  # run_batch
         return ret
 
     def launch_batch_sample_if_needed(
@@ -2451,15 +2471,19 @@ class Scheduler(
         batch: ScheduleBatch,
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
     ):
+        import torch.cuda.nvtx as nvtx
+
         if batch.forward_mode.is_decode():
             self.process_batch_result_decode(batch, result)
             trace_slice_batch(RequestStage.DECODE_LOOP, batch.reqs)
         elif batch.forward_mode.is_extend():
             if batch.is_dllm():
+                nvtx.range_push("dllm::scheduler::process_result")
                 if self.dllm_config.enable_fdfo:
                     self.process_batch_result_dllm_fdfo(batch, result)
                 else:
                     self.process_batch_result_dllm(batch, result)
+                nvtx.range_pop()
             else:
                 self.process_batch_result_prefill(batch, result)
         elif batch.forward_mode.is_prebuilt():
