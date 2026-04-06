@@ -508,5 +508,36 @@ def release_kv_cache(req: Req, tree_cache: BasePrefixCache, is_insert: bool = Tr
     tree_cache.req_to_token_pool.free(req)
 
 
+def release_kv_cache_dllm_fdfo_sp(
+    req, tree_cache: BasePrefixCache, valid_kv_len: int
+):
+    """Release KV cache for a completed SP-mode request.
+
+    In FDFO SP mode, each decode round manually frees block1's KV slots.
+    This means req_to_token_pool[req_pool_idx, valid_kv_len:kv_committed_len]
+    already points to freed slots.  We must not call cache_finished_req (which
+    uses kv_committed_len) — instead we precisely release [cache_protected_len,
+    valid_kv_len), unlock the radix tree, and free the req pool slot.
+
+    Args:
+        req: The finished request.
+        tree_cache: The prefix cache instance.
+        valid_kv_len: Length of KV slots that are still valid (not yet freed).
+    """
+    # Release [cache_protected_len, valid_kv_len) — decode-stage KV not in radix tree
+    if valid_kv_len > req.cache_protected_len:
+        indices_to_free = tree_cache.req_to_token_pool.req_to_token[
+            req.req_pool_idx, req.cache_protected_len:valid_kv_len
+        ]
+        tree_cache.token_to_kv_pool_allocator.free(indices_to_free)
+
+    # Unlock radix-tree protected prefix so it becomes evictable
+    if req.last_node is not None:
+        tree_cache.dec_lock_ref(req.last_node)
+
+    # Free the req_to_token_pool slot
+    tree_cache.req_to_token_pool.free(req)
+
+
 def available_and_evictable_str(tree_cache: BasePrefixCache) -> str:
     return tree_cache.available_and_evictable_str()

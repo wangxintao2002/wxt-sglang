@@ -13,13 +13,23 @@ class DllmConfig:
         mask_id: int,
         max_running_requests: int,
         enable_fdfo: bool = False,
+        enable_super_prefill: bool = False,
     ):
         self.algorithm = algorithm
         self.algorithm_config = algorithm_config
         self.block_size = block_size
+        self.double_block_size = block_size * 2
         self.mask_id = mask_id
         self.max_running_requests = max_running_requests
         self.enable_fdfo = enable_fdfo
+        self.enable_super_prefill = enable_super_prefill
+
+    def get_block_size(self) -> int:
+        """Return the effective block size for batch/KV slot allocation.
+        SP mode uses 2*block_size as the unit; non-SP uses block_size."""
+        if self.enable_super_prefill:
+            return self.double_block_size
+        return self.block_size
 
     @staticmethod
     def from_server_args(
@@ -68,8 +78,9 @@ class DllmConfig:
             # Parse common algorithm configurations
             block_size = algorithm_config.get("block_size", block_size)
 
-        from sglang.srt.dllm.algorithm import get_algorithm_fdfo_requirement
+        from sglang.srt.dllm.algorithm import get_algorithm_fdfo_requirement, get_algorithm_sp_requirement
         enable_fdfo = get_algorithm_fdfo_requirement(server_args.dllm_algorithm)
+        enable_super_prefill = get_algorithm_sp_requirement(server_args.dllm_algorithm)
 
         return DllmConfig(
             algorithm=server_args.dllm_algorithm,
@@ -78,4 +89,5 @@ class DllmConfig:
             mask_id=mask_id,
             max_running_requests=max_running_requests,
             enable_fdfo=enable_fdfo,
+            enable_super_prefill=enable_super_prefill,
         )

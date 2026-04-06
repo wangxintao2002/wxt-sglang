@@ -56,6 +56,7 @@ if is_flashinfer_available():
 class WrapperDispatch(Enum):
     SLIDING_WINDOW = auto()
     CROSS_ATTENTION = auto()
+    DLLM_SUPER_PREFILL = auto()
 
 
 @dataclass
@@ -157,6 +158,9 @@ class FlashInferAttnBackend(AttentionBackend):
         elif model_runner.model_config.is_encoder_decoder:
             self.num_wrappers = 2
             self.dispatch_reason = WrapperDispatch.CROSS_ATTENTION
+        elif self.is_dllm_model and self.dllm_config.enable_super_prefill:
+            self.num_wrappers = 1
+            self.dispatch_reason = WrapperDispatch.DLLM_SUPER_PREFILL
         else:
             self.num_wrappers = 1
             self.dispatch_reason = None
@@ -254,6 +258,27 @@ class FlashInferAttnBackend(AttentionBackend):
         self.prefill_wrapper_ragged = BatchPrefillWithRaggedKVCacheWrapper(
             self.workspace_buffer, "NHD", backend=fmha_backend
         )
+
+        # DLLM Super Prefill: extra ragged wrapper and pre-allocated indptr buffers
+        if self.is_dllm_model and self.dllm_config.enable_super_prefill:
+            self.prefill_wrapper_ragged_local = BatchPrefillWithRaggedKVCacheWrapper(
+                self.workspace_buffer, "NHD", backend=fmha_backend
+            )
+            max_bs = model_runner.req_to_token_pool.size
+            self.dllm_qo_indptr_shared_buf = torch.zeros(
+                (max_bs + 1,), dtype=torch.int32, device=model_runner.device
+            )
+            self.dllm_kv_indptr_shared_buf = torch.zeros(
+                (max_bs + 1,), dtype=torch.int32, device=model_runner.device
+            )
+            self.dllm_qo_indptr_local_buf = torch.zeros(
+                (max_bs + 1,), dtype=torch.int32, device=model_runner.device
+            )
+        else:
+            self.prefill_wrapper_ragged_local = None
+            self.dllm_qo_indptr_shared_buf = None
+            self.dllm_kv_indptr_shared_buf = None
+            self.dllm_qo_indptr_local_buf = None
 
         # Two wrappers: one for sliding window attention and one for full attention.
         # Using two wrappers is unnecessary in the current PR, but are prepared for future PRs
@@ -669,7 +694,7 @@ class FlashInferAttnBackend(AttentionBackend):
                 seq_lens,
                 seq_lens.cpu(),  # may add a little overhead in capture stage
                 seq_lens_sum,
-                prefix_lens=seq_lens - self.dllm_config.block_size,
+                prefix_lens=seq_lens - self.dllm_config.get_block_size(),
                 prefill_wrappers=prefill_wrappers,
                 use_ragged=True,
                 encoder_lens=encoder_lens,
@@ -733,7 +758,7 @@ class FlashInferAttnBackend(AttentionBackend):
                 seq_lens[:bs],
                 seq_lens_cpu[:bs] if seq_lens_cpu is not None else None,
                 seq_lens_sum,
-                prefix_lens=seq_lens - self.dllm_config.block_size,
+                prefix_lens=seq_lens - self.dllm_config.get_block_size(),
                 prefill_wrappers=self.prefill_cuda_graph_metadata[bs],
                 use_ragged=True,
                 encoder_lens=encoder_lens[:bs] if encoder_lens is not None else None,
@@ -829,6 +854,28 @@ class FlashInferAttnBackend(AttentionBackend):
                 )
 
             else:
+                if self.is_dllm_model and self.dllm_config.enable_super_prefill:
+                    # SP mode: fused 2-block attention (wrappers pre-initialised by update_dllm_wrapper)
+                    from sglang.srt.layers.attention.dllm_attention import super_prefill_fused_attn_v2
+                    if save_kv_cache:
+                        forward_batch.token_to_kv_pool.set_kv_buffer(
+                            layer, cache_loc, k, v, layer.k_scale, layer.v_scale
+                        )
+                    o = super_prefill_fused_attn_v2(
+                        self.dllm_config.block_size,
+                        forward_batch.batch_size,
+                        q,
+                        k,
+                        v,
+                        forward_batch,
+                        layer,
+                        prefill_wrapper_paged,
+                        self.prefill_wrapper_ragged,
+                        self.prefill_wrapper_ragged_local,
+                        logits_soft_cap,
+                    )
+                    return o.view(-1, layer.tp_q_head_num * layer.head_dim)
+
                 if not self.is_dllm_model:
                     # TODO: design a better interface
                     # For other models, use causal attention for the ragged part as previously
@@ -1191,12 +1238,16 @@ class FlashInferIndicesUpdaterPrefill:
         self.req_to_token = model_runner.req_to_token_pool.req_to_token
         self.token_to_kv_pool_allocator = model_runner.token_to_kv_pool_allocator
         self.prefill_wrapper_ragged = attn_backend.prefill_wrapper_ragged
+        self.prefill_wrapper_ragged_local = attn_backend.prefill_wrapper_ragged_local
+        self.dllm_config = attn_backend.dllm_config
 
         # Dispatch the update function
         if self.attn_backend.dispatch_reason == WrapperDispatch.SLIDING_WINDOW:
             self.update = self.update_sliding_window
         elif self.attn_backend.dispatch_reason == WrapperDispatch.CROSS_ATTENTION:
             self.update = self.update_cross_attention
+        elif self.attn_backend.dispatch_reason == WrapperDispatch.DLLM_SUPER_PREFILL:
+            self.update = self.update_dllm_wrapper
         else:
             assert self.attn_backend.num_wrappers == 1
             self.update = self.update_single_wrapper
@@ -1347,6 +1398,61 @@ class FlashInferIndicesUpdaterPrefill:
                 spec_info,
                 multi_item_params=multi_item_params,
             )
+
+    def update_dllm_wrapper(
+        self,
+        req_pool_indices: torch.Tensor,
+        seq_lens: torch.Tensor,
+        seq_lens_cpu: Optional[torch.Tensor],
+        seq_lens_sum: int,
+        prefix_lens: torch.Tensor,
+        prefill_wrappers: List[BatchPrefillWithPagedKVCacheWrapper],
+        use_ragged: bool,
+        encoder_lens: Optional[torch.Tensor],
+        spec_info: Optional[SpecInput],
+        fixed_split_size: Optional[int] = None,
+        multi_item_params: Optional[MultiItemScoringParams] = None,
+    ):
+        import torch.cuda.nvtx as nvtx
+
+        nvtx.range_push("dllm::wrapper_init")
+        from sglang.srt.layers.attention.dllm_attention import call_dllm_begin_forward
+
+        if use_ragged:
+            paged_kernel_lens = prefix_lens
+            paged_kernel_lens_sum = paged_kernel_lens.sum().item()
+        else:
+            paged_kernel_lens = seq_lens
+            paged_kernel_lens_sum = seq_lens_sum
+
+        call_dllm_begin_forward(
+            wrapper_ragged_shared=self.prefill_wrapper_ragged,
+            wrapper_ragged_local=self.prefill_wrapper_ragged_local,
+            wrapper_paged=prefill_wrappers[0],
+            req_pool_indices=req_pool_indices,
+            paged_kernel_lens=paged_kernel_lens,
+            paged_kernel_lens_sum=paged_kernel_lens_sum,
+            seq_lens=seq_lens,
+            prefix_lens=prefix_lens,
+            kv_start_idx=None,
+            kv_indptr=self.kv_indptr[0],
+            qo_indptr=self.qo_indptr[0],
+            use_ragged=use_ragged,
+            spec_info=spec_info,
+            block_size=self.dllm_config.block_size,
+            num_qo_heads=self.num_qo_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_dim=self.head_dim,
+            q_data_type=self.q_data_type,
+            kv_data_type=self.data_type,
+            kv_last_page_len=self.kv_last_page_len,
+            req_to_token=self.req_to_token,
+            qo_indptr_shared_buf=self.attn_backend.dllm_qo_indptr_shared_buf,
+            kv_indptr_shared_buf=self.attn_backend.dllm_kv_indptr_shared_buf,
+            qo_indptr_local_buf=self.attn_backend.dllm_qo_indptr_local_buf,
+            fixed_split_size=fixed_split_size,
+        )
+        nvtx.range_pop()
 
     def call_begin_forward(
         self,

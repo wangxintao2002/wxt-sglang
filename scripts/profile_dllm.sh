@@ -14,6 +14,7 @@ OUTPUT_DIR=${OUTPUT_DIR:-/home/wxt/nsys_reports}
 PYTHON=${PYTHON:-/home/wxt/miniconda3/envs/wxt-sglang/bin/python}
 MAX_TOKENS=${MAX_TOKENS:-128}
 NUM_REQUESTS=${NUM_REQUESTS:-3}
+ALGORITHM_CONFIG=${ALGORITHM_CONFIG:-}
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -29,7 +30,7 @@ echo "============================================"
 
 # Launch server under nsys
 echo "[1/4] Starting sglang server under nsys..."
-PYTHONNOUSERSITE=1 nsys profile \
+nsys profile \
     --trace=cuda,nvtx,osrt \
     --cuda-graph-trace=node \
     --output="${REPORT_PATH}" \
@@ -44,7 +45,8 @@ PYTHONNOUSERSITE=1 nsys profile \
         --mem-fraction-static 0.75 \
         --cuda-graph-max-bs 32 \
         --max-running-requests 256 \
-        --skip-server-warmup &
+        --skip-server-warmup \
+        ${ALGORITHM_CONFIG:+--dllm-algorithm-config "$ALGORITHM_CONFIG"} &
 
 SERVER_PID=$!
 echo "Server PID: ${SERVER_PID}"
@@ -89,19 +91,26 @@ done
 echo "[4/4] Stopping server and collecting nsys report..."
 sleep 3
 
-# Find the python sglang child process of nsys and send it SIGINT
-CHILDREN=$(pgrep -P $SERVER_PID 2>/dev/null)
-for pid in $CHILDREN; do
-    kill -INT $pid 2>/dev/null || true
+# Find the actual sglang python process (grandchild of nsys) and send SIGINT
+SGLANG_PID=$(pgrep -f "sglang.launch_server" 2>/dev/null | head -1)
+if [ -n "$SGLANG_PID" ]; then
+    echo "Sending SIGINT to sglang PID: $SGLANG_PID"
+    kill -INT "$SGLANG_PID" 2>/dev/null || true
+fi
+
+# Wait for nsys to finish writing the report (may take up to 120s for large traces)
+echo "Waiting for nsys to write report..."
+for i in $(seq 1 120); do
+    if ! kill -0 $SERVER_PID 2>/dev/null; then
+        echo "nsys exited after ${i}s"
+        break
+    fi
+    sleep 1
 done
 
-# Wait for nsys to finish writing the report (may take up to 60s for large traces)
-echo "Waiting for nsys to write report..."
-wait $SERVER_PID 2>/dev/null || true
-
-# Clean up any remaining sglang processes
-pkill -9 -f "sglang" 2>/dev/null || true
-sleep 1
+# Force-kill if still running
+kill -9 $SERVER_PID 2>/dev/null || true
+sleep 2
 
 echo ""
 echo "============================================"

@@ -5,6 +5,7 @@ from sglang.srt.server_args import ServerArgs
 
 class DllmAlgorithm:
     requires_fdfo_mode: bool = False
+    enable_super_prefill: bool = False
 
     def __init__(
         self,

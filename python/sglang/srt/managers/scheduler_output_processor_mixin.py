@@ -22,7 +22,7 @@ from sglang.srt.managers.schedule_batch import (
     RequestStage,
     ScheduleBatch,
 )
-from sglang.srt.mem_cache.common import release_kv_cache
+from sglang.srt.mem_cache.common import release_kv_cache, release_kv_cache_dllm_fdfo_sp
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.tracing.trace import trace_slice, trace_slice_batch, trace_slice_end
 
@@ -383,6 +383,123 @@ class SchedulerOutputProcessorMixin:
             batch.reqs, batch.return_logprob, is_idle_batch=True
         )
 
+    def process_batch_result_dllm_fdfo_sp(
+        self: Scheduler,
+        batch: ScheduleBatch,
+        result: GenerationBatchResult,
+    ):
+        """Handle 2-block decode/prefill results for SP-mode DLLM.
+
+        accept_length per req is one of:
+          0                → both blocks still decoding, retry
+          block_size       → block0 confirmed, block1 still decoding
+          double_block_size → both blocks confirmed (includes prefill pass)
+        """
+        import torch.cuda.nvtx as nvtx
+
+        nvtx.range_push("dllm::output::process_fdfo_sp")
+        nvtx.range_push("dllm::d2h_sync")
+        if result.copy_done is not None:
+            result.copy_done.synchronize()
+        nvtx.range_pop()
+
+        block_size = batch.dllm_config.block_size
+        double_block_size = batch.dllm_config.double_block_size
+        self.token_to_kv_pool_allocator.free_group_begin()
+
+        kv_indices_to_free_list = []
+
+        for idx in range(batch.batch_size()):
+            req = batch.reqs[idx]
+            next_token_ids: list = result.next_token_ids[idx]  # list[int], len==2*block_size
+            accept_length: int = result.accept_length_per_req_cpu[idx]
+
+            assert len(next_token_ids) == double_block_size, (
+                f"Expected {double_block_size} tokens, got {len(next_token_ids)}"
+            )
+
+            idx_end = len(req.fill_ids)
+            idx_start = idx_end - double_block_size
+            len_input = len(req.origin_input_ids)
+
+            if accept_length == 0:
+                # Both blocks still decoding: save intermediate state, free 2b KV slots
+                req.dllm_incomplete_ids = next_token_ids
+                kv_indices_to_free_list.append(
+                    self.req_to_token_pool.req_to_token[req.req_pool_idx, idx_start:idx_end]
+                )
+                continue
+
+            if accept_length == double_block_size:
+                # Both blocks confirmed (prefill pass or fast decode):
+                # cache full 2-block window, emit any output tokens
+                req.dllm_incomplete_ids = []
+                block0 = next_token_ids[:block_size]
+                block1 = next_token_ids[block_size:]
+                finished = False
+                for block_idx, block in enumerate((block0, block1)):
+                    blk_start = idx_start + block_idx * block_size
+                    for tok_offset, token_id in enumerate(block):
+                        if blk_start + tok_offset >= len_input:
+                            req.output_ids.append(token_id)
+                            self.num_generated_tokens += 1
+                            req.check_finished()
+                            if req.finished():
+                                release_kv_cache_dllm_fdfo_sp(req, self.tree_cache, idx_end)
+                                req.time_stats.completion_time = time.perf_counter()
+                                finished = True
+                                break
+                    if finished:
+                        break
+                if not finished:
+                    kv_indices = self.req_to_token_pool.req_to_token[
+                        req.req_pool_idx, :idx_end
+                    ]
+                    req.prefix_indices = kv_indices.to(dtype=torch.int64, copy=True)
+                continue
+
+            # accept_length == block_size: block0 confirmed, block1 still decoding
+            block0 = next_token_ids[:block_size]
+            block1 = next_token_ids[block_size:]
+
+            req.dllm_incomplete_ids = block1
+            unclean_start = idx_end - block_size
+            kv_indices_to_free_list.append(
+                self.req_to_token_pool.req_to_token[req.req_pool_idx, unclean_start:idx_end]
+            )
+
+            finished = False
+            if idx_start + block_size > len_input:
+                # block0 has output tokens
+                output_block0 = block0
+                if len_input > idx_start:
+                    output_block0 = block0[len_input - idx_start:]
+
+                self.num_generated_tokens += len(output_block0)
+                for token_id in output_block0:
+                    req.output_ids.append(token_id)
+                    req.check_finished()
+                    if req.finished():
+                        release_kv_cache_dllm_fdfo_sp(req, self.tree_cache, unclean_start)
+                        req.time_stats.completion_time = time.perf_counter()
+                        finished = True
+                        break
+
+            if not finished:
+                # Update prefix_indices to cover up to end of block0 (not block1, which was freed)
+                kv_indices = self.req_to_token_pool.req_to_token[
+                    req.req_pool_idx, :unclean_start
+                ]
+                req.prefix_indices = kv_indices.to(dtype=torch.int64, copy=True)
+
+        # Batch-free all KV slots collected above
+        if kv_indices_to_free_list:
+            self.token_to_kv_pool_allocator.free(torch.cat(kv_indices_to_free_list))
+
+        self.stream_output(batch.reqs, batch.return_logprob)
+        self.token_to_kv_pool_allocator.free_group_end()
+        nvtx.range_pop()  # process_fdfo_sp
+
     def process_batch_result_dllm_fdfo(
         self: Scheduler,
         batch: ScheduleBatch,
@@ -391,8 +508,10 @@ class SchedulerOutputProcessorMixin:
         import torch.cuda.nvtx as nvtx
 
         nvtx.range_push("dllm::output::process_fdfo")
+        nvtx.range_push("dllm::d2h_sync")
         if result.copy_done is not None:
             result.copy_done.synchronize()
+        nvtx.range_pop()
 
         self.token_to_kv_pool_allocator.free_group_begin()
 

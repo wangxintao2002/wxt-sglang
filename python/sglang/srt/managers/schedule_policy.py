@@ -431,7 +431,7 @@ class PrefillAdder:
         self.prefill_delayer_single_pass = prefill_delayer_single_pass
 
     def _init_dllm_meta(self, dllm_config: DllmConfig):
-        self.dllm_block_size = dllm_config.block_size
+        self.dllm_block_size = dllm_config.get_block_size()
         max_running_reqs = dllm_config.max_running_requests
 
         self.rem_dllm_tokens = max_running_reqs * self.dllm_block_size

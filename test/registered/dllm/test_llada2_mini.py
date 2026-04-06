@@ -49,6 +49,9 @@ class TestLLaDA2Mini(CustomTestCase):
             "4",
         ]
 
+        if (cfg := os.getenv("SGLANG_TEST_DLLM_ALGORITHM_CONFIG")) is not None:
+            other_args.extend(["--dllm-algorithm-config", cfg])
+
         env = {}
         if (x := os.getenv("SGLANG_DLLM_TRACE_PATH")) is not None:
             env["SGLANG_DLLM_TRACE_PATH"] = x

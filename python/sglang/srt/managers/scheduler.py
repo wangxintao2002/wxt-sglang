@@ -1107,7 +1107,11 @@ class Scheduler(
     @DynamicGradMode()
     def event_loop_normal(self):
         """A normal scheduler loop."""
+        from sglang.srt.dllm.instrumentation import record_dllm_event
+
         while True:
+            t_loop_start = time.perf_counter()
+
             # Receive requests
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
@@ -1119,7 +1123,26 @@ class Scheduler(
             self.cur_batch = batch
 
             # Launch the current batch
-            if batch:
+            if batch and batch.is_dllm():
+                import torch.cuda.nvtx as nvtx
+
+                nvtx.range_push("dllm::round")
+                t_sched_done = time.perf_counter()
+                result = self.run_batch(batch)
+                t_forward_done = time.perf_counter()
+                self.process_batch_result(batch, result)
+                t_result_done = time.perf_counter()
+                nvtx.range_pop()
+                record_dllm_event(
+                    "dllm_round",
+                    algo=self.server_args.dllm_algorithm,
+                    batch_size=batch.batch_size(),
+                    schedule_ms=(t_sched_done - t_loop_start) * 1000,
+                    run_batch_ms=(t_forward_done - t_sched_done) * 1000,
+                    process_result_ms=(t_result_done - t_forward_done) * 1000,
+                    round_ms=(t_result_done - t_loop_start) * 1000,
+                )
+            elif batch:
                 result = self.run_batch(batch)
                 self.process_batch_result(batch, result)
             else:
@@ -2310,10 +2333,18 @@ class Scheduler(
             return self._run_batch_prebuilt(batch)
 
         # Run forward
+        _dllm_prepare_ms = 0.0
+        _dllm_forward_ms = 0.0
         if self.is_generation:
             if self.spec_algorithm.is_none() or self.enable_overlap:
                 # In most cases, we use the model worker batch to run the forward.
+                if batch.is_dllm():
+                    nvtx.range_push("dllm::run_batch::prepare")
+                    _t_prep = time.perf_counter()
                 worker_batch_or_batch = batch.get_model_worker_batch()
+                if batch.is_dllm():
+                    _dllm_prepare_ms = (time.perf_counter() - _t_prep) * 1000
+                    nvtx.range_pop()
             else:
                 # In speculative decoding v1 (non-overlap) case, we use the batch directly.
                 # TODO(lsyin): delete this branch after unifying the abstraction.
@@ -2374,10 +2405,16 @@ class Scheduler(
                     if self.spec_algorithm.is_none()
                     else {}
                 )
+                if batch.is_dllm():
+                    nvtx.range_push("dllm::run_batch::forward")
+                    _t_fwd = time.perf_counter()
                 with self.record_forward_metrics(batch):
                     batch_result = self.model_worker.forward_batch_generation(
                         worker_batch_or_batch, **kwargs
                     )
+                if batch.is_dllm():
+                    _dllm_forward_ms = (time.perf_counter() - _t_fwd) * 1000
+                    nvtx.range_pop()
                 future_indices_or_next_token_ids = batch_result.next_token_ids
                 self.update_cache_from_scheduler(batch, batch_result)
 
@@ -2442,6 +2479,8 @@ class Scheduler(
                 "dllm_run_batch",
                 algo=self.server_args.dllm_algorithm,
                 run_batch_ms=(time.perf_counter() - run_batch_t0) * 1000,
+                prepare_ms=_dllm_prepare_ms,
+                forward_ms=_dllm_forward_ms,
                 batch_size=batch.batch_size(),
                 num_decode_reqs=getattr(batch, "dllm_metric_num_decode_reqs", 0),
                 num_prefill_reqs=getattr(batch, "dllm_metric_num_prefill_reqs", 0),
@@ -2479,7 +2518,9 @@ class Scheduler(
         elif batch.forward_mode.is_extend():
             if batch.is_dllm():
                 nvtx.range_push("dllm::scheduler::process_result")
-                if self.dllm_config.enable_fdfo:
+                if self.dllm_config.enable_super_prefill:
+                    self.process_batch_result_dllm_fdfo_sp(batch, result)
+                elif self.dllm_config.enable_fdfo:
                     self.process_batch_result_dllm_fdfo(batch, result)
                 else:
                     self.process_batch_result_dllm(batch, result)

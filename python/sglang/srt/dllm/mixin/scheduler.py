@@ -208,6 +208,7 @@ class SchedulerDllmMixin:
         new_batch.prepare_for_extend()
         new_batch.forward_mode = forward_mode
         new_batch.decoding_reqs = None
+
         new_batch.dllm_metric_max_decode_rounds = (
             max(decode_round_counts) if decode_round_counts else 0
         )
@@ -292,7 +293,7 @@ class DllmManager:
         self.staging_queue: List[Req] = []
 
     def get_prefill_requests(self) -> List[Req]:
-        """Get all prefill requests from waiting queue."""
+        """Get all prefill (INCOMING_PREFILL) requests from waiting queue."""
         return [req for req in self.waiting_queue if req.is_dllm_prefill()]
 
     def get_decode_requests(self) -> List[Req]:

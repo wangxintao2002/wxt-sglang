@@ -40,5 +40,10 @@ def get_algorithm_fdfo_requirement(algorithm_name: str) -> bool:
         return getattr(algo_name_to_cls[algorithm_name], "requires_fdfo_mode", False)
     return False
 
+def get_algorithm_sp_requirement(algorithm_name: str) -> bool:
+    if algorithm_name in algo_name_to_cls:
+        return getattr(algo_name_to_cls[algorithm_name], "enable_super_prefill", False)
+    return False
+
 
 algo_name_to_cls = import_algorithms()

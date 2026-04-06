@@ -290,7 +290,7 @@ class CudaGraphRunner:
                 )
         elif self.is_dllm:
             self.capture_forward_mode = ForwardMode.DLLM_EXTEND
-            self.num_tokens_per_bs = self.dllm_config.block_size
+            self.num_tokens_per_bs = self.dllm_config.get_block_size()
 
         # Batch sizes to capture
         self.capture_bs, self.compile_bs = get_batch_sizes_to_capture(
@@ -316,7 +316,7 @@ class CudaGraphRunner:
         self.seq_len_fill_value = (
             self.model_runner.attn_backend.get_cuda_graph_seq_len_fill_value()
             if self.dllm_config is None
-            else self.dllm_config.block_size
+            else self.dllm_config.get_block_size()
         )
 
         self.encoder_len_fill_value = 0
