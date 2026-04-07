@@ -14,6 +14,7 @@ class DllmConfig:
         max_running_requests: int,
         enable_fdfo: bool = False,
         enable_super_prefill: bool = False,
+        prefill_ratio: float = 0.0,
     ):
         self.algorithm = algorithm
         self.algorithm_config = algorithm_config
@@ -23,6 +24,7 @@ class DllmConfig:
         self.max_running_requests = max_running_requests
         self.enable_fdfo = enable_fdfo
         self.enable_super_prefill = enable_super_prefill
+        self.prefill_ratio = prefill_ratio
 
     def get_block_size(self) -> int:
         """Return the effective block size for batch/KV slot allocation.
@@ -90,4 +92,5 @@ class DllmConfig:
             max_running_requests=max_running_requests,
             enable_fdfo=enable_fdfo,
             enable_super_prefill=enable_super_prefill,
+            prefill_ratio=getattr(server_args, "dllm_prefill_ratio", 0.0),
         )

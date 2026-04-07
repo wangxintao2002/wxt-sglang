@@ -723,6 +723,10 @@ class Scheduler(
                     rank=self.tp_rank,
                     tp_group=self.tp_group,
                 )
+            elif server_args.dllm_algorithm is not None:
+                from sglang.srt.mem_cache.dllm_radix_cache import DllmRadixCache
+
+                self.tree_cache = DllmRadixCache(params)
             else:
                 self.tree_cache = RadixCache(params)
 
@@ -2516,7 +2520,9 @@ class Scheduler(
             self.process_batch_result_decode(batch, result)
             trace_slice_batch(RequestStage.DECODE_LOOP, batch.reqs)
         elif batch.forward_mode.is_extend():
-            if batch.is_dllm():
+            if getattr(batch, "dllm_ar_prefill", False):
+                self.process_batch_result_dllm_ar_prefill(batch, result)
+            elif batch.is_dllm():
                 nvtx.range_push("dllm::scheduler::process_result")
                 if self.dllm_config.enable_super_prefill:
                     self.process_batch_result_dllm_fdfo_sp(batch, result)

@@ -464,7 +464,7 @@ class TpModelWorker(BaseTpWorker):
             # FIXME(lsyin): unify the interface of forward_batch
             assert forward_batch is not None
 
-        if self.is_dllm():
+        if self.is_dllm() and forward_batch.forward_mode.is_dllm_extend():
             return self._forward_batch_generation_dllm(forward_batch)
 
         if self.pp_group.is_last_rank:

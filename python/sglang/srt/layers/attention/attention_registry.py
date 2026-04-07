@@ -116,6 +116,23 @@ def create_flex_attention_backend(runner):
     return TorchFlexAttnBackend(runner)
 
 
+def _get_dllm_block_size(runner):
+    if runner.server_args.dllm_algorithm is None:
+        return 4
+    from sglang.srt.dllm.config import DllmConfig
+
+    return DllmConfig.from_server_args(runner.server_args).block_size
+
+
+@register_attention_backend("block_causal_varlen_attention")
+def create_block_causal_varlen_attention_backend(runner):
+    from sglang.srt.layers.attention.block_causal_varlen_backend import (
+        BlockCausalVarlenBackend,
+    )
+
+    return BlockCausalVarlenBackend(runner, block_size=_get_dllm_block_size(runner))
+
+
 @register_attention_backend("flashmla")
 def create_flashmla_backend(runner):
     from sglang.srt.layers.attention.flashmla_backend import FlashMLABackend

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 import torch
 
 from sglang.srt.dllm.instrumentation import record_dllm_event
+from sglang.srt.dllm.mixin.req import DllmReqPhase
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
@@ -22,7 +23,11 @@ from sglang.srt.managers.schedule_batch import (
     RequestStage,
     ScheduleBatch,
 )
-from sglang.srt.mem_cache.common import release_kv_cache, release_kv_cache_dllm_fdfo_sp
+from sglang.srt.mem_cache.common import (
+    release_kv_cache,
+    release_kv_cache_dllm,
+    release_kv_cache_dllm_fdfo_sp,
+)
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.tracing.trace import trace_slice, trace_slice_batch, trace_slice_end
 
@@ -591,7 +596,7 @@ class SchedulerOutputProcessorMixin:
                 req.output_ids.append(next_token_id)
                 req.check_finished()
                 if req.finished():
-                    release_kv_cache(req, self.tree_cache)
+                    release_kv_cache_dllm(req, self.tree_cache)
                     req.time_stats.completion_time = time.perf_counter()
                     queue_entry = req.time_stats.wait_queue_entry_time
                     completion_latency_ms = (
@@ -686,7 +691,7 @@ class SchedulerOutputProcessorMixin:
                 req.output_ids.append(next_token_id)
                 req.check_finished()
                 if req.finished():
-                    release_kv_cache(req, self.tree_cache)
+                    release_kv_cache_dllm(req, self.tree_cache)
                     req.time_stats.completion_time = time.perf_counter()
                     queue_entry = req.time_stats.wait_queue_entry_time
                     completion_latency_ms = (
@@ -716,6 +721,21 @@ class SchedulerOutputProcessorMixin:
                 dp_cooperation_info=batch.dp_cooperation_info,
             )
         nvtx.range_pop()  # process_dllm
+
+    def process_batch_result_dllm_ar_prefill(
+        self: Scheduler,
+        batch: ScheduleBatch,
+        result: GenerationBatchResult,
+    ):
+        if result.copy_done is not None:
+            result.copy_done.synchronize()
+
+        self.token_to_kv_pool_allocator.free_group_begin()
+        for req in batch.reqs:
+            self.tree_cache.cache_unfinished_req(req)
+            req.dllm_phase = DllmReqPhase.STAGING_DECODE
+        self.stream_output(batch.reqs, batch.return_logprob)
+        self.token_to_kv_pool_allocator.free_group_end()
 
     def process_batch_result_decode(
         self: Scheduler,

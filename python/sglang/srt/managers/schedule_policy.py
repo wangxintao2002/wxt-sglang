@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union
 import torch
 
 from sglang.srt.dllm.config import DllmConfig
+from sglang.srt.dllm.mixin.req import DllmReqPhase
 from sglang.srt.layers.attention.nsa.utils import is_nsa_prefill_cp_in_seq_split
 from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
 from sglang.srt.mem_cache.base_prefix_cache import (
@@ -686,10 +687,17 @@ class PrefillAdder:
                 tokens_freed += tokens_occupied
 
         if self.dllm_config is not None:
-            if self.rem_dllm_tokens <= 0:
-                return AddReqResult.OTHER
-
-            self._add_dllm_req(req, 0)
+            if req.dllm_phase == DllmReqPhase.INCOMING_PREFILL:
+                self.can_run_list.append(req)
+                self._update_prefill_budget(
+                    0,
+                    req.extend_input_len,
+                    min(req.sampling_params.max_new_tokens, CLIP_MAX_NEW_TOKENS),
+                )
+            else:
+                if self.rem_dllm_tokens <= 0:
+                    return AddReqResult.OTHER
+                self._add_dllm_req(req, 0)
         elif (
             self.rem_chunk_tokens is None  # chunked prefill is disabled
             or req.extend_input_len <= self.rem_chunk_tokens  # it is the last chunk
@@ -774,15 +782,21 @@ class PrefillAdder:
                 return AddReqResult.OTHER
 
             if self.dllm_config is not None:
-                if self.rem_dllm_tokens <= 0:
-                    return AddReqResult.OTHER
-
-                assert (
-                    truncation_align_size is None
-                ), "truncation_align_size is not supported for dllm prefill"
-
-                self._add_dllm_req(req, prefix_len)
-                self._req_inc_lock_ref(req)
+                if req.dllm_phase == DllmReqPhase.INCOMING_PREFILL:
+                    self.can_run_list.append(req)
+                    self._req_inc_lock_ref(req)
+                    self._update_prefill_budget(
+                        prefix_len,
+                        input_tokens,
+                        min(
+                            req.sampling_params.max_new_tokens,
+                            CLIP_MAX_NEW_TOKENS,
+                        ),
+                    )
+                else:
+                    raise RuntimeError(
+                        "add_one_req only happens when dllm_phase is INCOMING_PREFILL"
+                    )
             elif self.rem_chunk_tokens is None or input_tokens <= self.rem_chunk_tokens:
                 # Non-chunked prefill
                 self.can_run_list.append(req)

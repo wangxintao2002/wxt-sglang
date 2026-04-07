@@ -508,6 +508,19 @@ def release_kv_cache(req: Req, tree_cache: BasePrefixCache, is_insert: bool = Tr
     tree_cache.req_to_token_pool.free(req)
 
 
+def release_kv_cache_dllm(req: Req, tree_cache: BasePrefixCache, is_insert: bool = True):
+    """Release KV cache for a completed DLLM request."""
+    valid_kv_len = len(req.origin_input_ids) + len(req.output_ids)
+    fill_len = len(req.fill_ids)
+    if fill_len > valid_kv_len:
+        indices_to_free = tree_cache.req_to_token_pool.req_to_token[
+            req.req_pool_idx, valid_kv_len:fill_len
+        ]
+        tree_cache.token_to_kv_pool_allocator.free(indices_to_free)
+
+    release_kv_cache(req, tree_cache, is_insert=is_insert)
+
+
 def release_kv_cache_dllm_fdfo_sp(
     req, tree_cache: BasePrefixCache, valid_kv_len: int
 ):

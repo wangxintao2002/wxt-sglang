@@ -124,6 +124,7 @@ ATTENTION_BACKEND_CHOICES = [
     "triton",
     "torch_native",
     "flex_attention",
+    "block_causal_varlen_attention",
     "nsa",
     # NVIDIA specific
     "cutlass_mla",
@@ -553,6 +554,7 @@ class ServerArgs:
     # Diffusion LLM
     dllm_algorithm: Optional[str] = None
     dllm_algorithm_config: Optional[str] = None
+    dllm_prefill_ratio: float = 0.0
 
     # Double Sparsity
     enable_double_sparsity: bool = False
@@ -2815,16 +2817,20 @@ class ServerArgs:
                     "Attention backend is set to flashinfer because of enabling cuda graph in diffusion LLM inference"
                 )
                 self.attention_backend = "flashinfer"
+        if (
+            not is_hip()
+            and self.prefill_attention_backend is None
+            and self.decode_attention_backend is None
+        ):
+            if self.attention_backend is None:
+                self.attention_backend = "flashinfer"
+            self.prefill_attention_backend = "block_causal_varlen_attention"
+            self.decode_attention_backend = self.attention_backend
         if not self.disable_overlap_schedule:
             logger.warning(
                 "Overlap schedule is disabled because of using diffusion LLM inference"
             )
             self.disable_overlap_schedule = True
-        if not self.disable_radix_cache:
-            logger.warning(
-                "Radix cache is disabled because of using diffusion LLM inference"
-            )
-            self.disable_radix_cache = True
         if not self.pp_size > 1:
             logger.warning(
                 "Pipeline parallelism is disabled because of using diffusion LLM inference"
@@ -4389,6 +4395,12 @@ class ServerArgs:
             type=str,
             default=ServerArgs.dllm_algorithm_config,
             help="The diffusion LLM algorithm configurations. Must be a YAML file.",
+        )
+        parser.add_argument(
+            "--dllm-prefill-ratio",
+            type=float,
+            default=ServerArgs.dllm_prefill_ratio,
+            help="Batching threshold for DLLM AR-prefill rounds.",
         )
 
         # Double Sparsity

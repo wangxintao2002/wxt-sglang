@@ -902,13 +902,15 @@ class Req(ReqDllmMixin):
     def init_next_round_input(self, tree_cache: Optional[BasePrefixCache] = None):
         if self.is_dllm():
             self._init_fill_ids_for_dllm()
-            self.determine_dllm_phase()
         else:
             self.fill_ids = self.origin_input_ids + self.output_ids
 
         input_len = len(self.fill_ids)
-        # NOTE: the matched length is at most 1 less than the input length to enable logprob computation
-        max_prefix_len = input_len - 1
+        if self.is_dllm():
+            max_prefix_len = len(self.dllm_origin_len_aligned) if tree_cache is not None else 0
+        else:
+            # NOTE: the matched length is at most 1 less than the input length to enable logprob computation
+            max_prefix_len = input_len - 1
         if self.return_logprob and self.logprob_start_len >= 0:
             max_prefix_len = min(max_prefix_len, self.logprob_start_len)
         max_prefix_len = max(max_prefix_len, 0)
@@ -1463,7 +1465,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     def prepare_for_extend(self):
         self.forward_mode = ForwardMode.EXTEND
 
-        if self.is_dllm():
+        if self.is_dllm() and not hasattr(self, "dllm_ar_prefill"):
             # For DLLM, we use a separate forward mode
             self.forward_mode = ForwardMode.DLLM_EXTEND
 
@@ -2283,7 +2285,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     def copy(self):
         # Only contain fields that will be used by process_batch_result
-        return ScheduleBatch(
+        batch_copy = ScheduleBatch(
             reqs=self.reqs,
             req_to_token_pool=self.req_to_token_pool,
             req_pool_indices=self.req_pool_indices,
@@ -2306,6 +2308,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             dp_cooperation_info=self.dp_cooperation_info,
             prefill_stats=self.prefill_stats,
         )
+        if hasattr(self, "dllm_ar_prefill"):
+            batch_copy.dllm_ar_prefill = self.dllm_ar_prefill
+        return batch_copy
 
     def maybe_evict_swa(self):
         if self.tree_cache.supports_swa():
